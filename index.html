@@ -545,9 +545,11 @@ function SeatTab({ rows, cols, blocked, fixedMap, students, onRowsChange, onCols
                   return (
                     <div key={c} onClick={() => handleSeatClick(r,c)}
                       className={`relative flex flex-col items-center justify-center border rounded-lg text-xs ${bgColor(r,c)}`}
-                      style={{minWidth:56,minHeight:48}}>
+                      style={{width:68,height:52,flexShrink:0}}>
                       {isBlocked ? <span className="text-gray-400">×</span> :
-                       fixedSt ? <><span className="font-medium text-center leading-tight px-0.5" style={{fontSize:11}}>{fixedSt.name}</span>
+                       fixedSt ? <><span className="font-medium text-center leading-tight w-full overflow-hidden"
+                           style={{fontSize:11,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden',wordBreak:'break-all',paddingLeft:2,paddingRight:2}}>
+                           {fixedSt.name}</span>
                          <Pill label="固定" color="amber" /></> :
                        <span className="text-gray-300">{r+1}-{c+1}</span>}
                     </div>
@@ -723,10 +725,13 @@ function GenerateTab({ students, rows, cols, blocked, fixedMap, history, current
                     const dup = dupPairs.has(key);
                     return (
                       <div key={c} className={`flex flex-col items-center justify-center border rounded-lg px-1 py-1 ${seatBg(r,c)}`}
-                        style={{minWidth:60,minHeight:52}}>
+                        style={{width:72,height:58,flexShrink:0}}>
                         {st ? (
                           <>
-                            <span className="text-xs font-medium text-center leading-tight">{st.name}</span>
+                            <span className="font-medium text-center leading-tight w-full overflow-hidden"
+                              style={{fontSize:11,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden',wordBreak:'break-all'}}>
+                              {st.name}
+                            </span>
                             <div className="flex flex-wrap justify-center">
                               {st.vision==='poor' && <Pill label="視力" color="orange" />}
                               {st.height==='tall' && <Pill label="高" color="gray" />}
