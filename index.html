@@ -301,6 +301,40 @@ function Spinner({ label, value, min=1, max=15, onChange }) {
   );
 }
 
+// ─── サンプルデータ ──────────────────────────────────────────────
+const SAMPLE_STUDENTS = [
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'青木 一郎' },
+  { gender:'female', vision:'poor',   height:'normal', notes:'メガネ', name:'伊藤 花子' },
+  { gender:'male',   vision:'normal', height:'tall',   notes:'' ,  name:'上田 次郎' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'江川 美咲' },
+  { gender:'male',   vision:'poor',   height:'normal', notes:'' ,  name:'岡本 健太' },
+  { gender:'female', vision:'normal', height:'tall',   notes:'' ,  name:'加藤 由美' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'木村 翔太' },
+  { gender:'female', vision:'poor',   height:'normal', notes:'コンタクト', name:'久保 さくら' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'小林 大輝' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'斎藤 彩' },
+  { gender:'male',   vision:'normal', height:'tall',   notes:'' ,  name:'坂本 颯' },
+  { gender:'female', vision:'poor',   height:'normal', notes:'' ,  name:'清水 陽子' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'鈴木 勇人' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'田中 あかり' },
+  { gender:'male',   vision:'poor',   height:'normal', notes:'席前希望', name:'中島 蓮' },
+  { gender:'female', vision:'normal', height:'tall',   notes:'' ,  name:'中村 ひな' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'西田 悠斗' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'橋本 莉子' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'林 陸' },
+  { gender:'female', vision:'poor',   height:'normal', notes:'' ,  name:'原田 心' },
+  { gender:'male',   vision:'normal', height:'tall',   notes:'' ,  name:'藤田 大地' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'松本 柚希' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'森 拓海' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'山田 葵' },
+  { gender:'male',   vision:'poor',   height:'normal', notes:'' ,  name:'吉田 蒼' },
+  { gender:'female', vision:'normal', height:'tall',   notes:'' ,  name:'渡辺 凛' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'安藤 空' },
+  { gender:'female', vision:'poor',   height:'normal', notes:'' ,  name:'池田 七海' },
+  { gender:'male',   vision:'normal', height:'normal', notes:'' ,  name:'石川 慧' },
+  { gender:'female', vision:'normal', height:'normal', notes:'' ,  name:'遠藤 朱音' },
+].map(s => ({ ...s, id: uid() }));
+
 // ─── 生徒管理タブ ──────────────────────────────────────────────
 function StudentTab({ students, fixedMap, onAdd, onDelete, onClear }) {
   const [form, setForm] = useState({ name:'', gender:'unknown', vision:'normal', height:'normal', notes:'' });
@@ -408,9 +442,15 @@ function StudentTab({ students, fixedMap, onAdd, onDelete, onClear }) {
       <div className="bg-white rounded-xl shadow-sm p-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">名簿 ({students.length}人)</h2>
-          {students.length > 0 && (
-            <button onClick={onClear} className="text-xs text-red-500 hover:text-red-700">全消去</button>
-          )}
+          <div className="flex gap-2 items-center">
+            <button onClick={() => onAdd(SAMPLE_STUDENTS.map(s=>({...s,id:uid()})))}
+              className="text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 px-2 py-1 rounded-lg">
+              サンプル生成
+            </button>
+            {students.length > 0 && (
+              <button onClick={onClear} className="text-xs text-red-500 hover:text-red-700">全消去</button>
+            )}
+          </div>
         </div>
         {students.length === 0 ? (
           <p className="text-sm text-gray-400 text-center py-4">生徒が登録されていません</p>
