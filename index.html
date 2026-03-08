@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>席替えアプリ</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body { background: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  .seat-grid-wrap { overflow-x: auto; }
+  .seat-grid-inner { display: inline-block; }
+  .spin-btn { width:28px; height:28px; border-radius:6px; border:1px solid #d1d5db; background:#fff; cursor:pointer; font-size:16px; display:flex; align-items:center; justify-content:center; }
+  .spin-btn:hover { background:#f3f4f6; }
+  .spin-input { width:44px; height:28px; text-align:center; border:1px solid #d1d5db; border-radius:6px; font-size:14px; }
+  .tag { display:inline-block; font-size:10px; padding:1px 4px; border-radius:4px; margin:1px; line-height:1.4; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+// ─── ユーティリティ ───────────────────────────────────────────
+const uid = () => Math.random().toString(36).slice(2, 9);
+const seatKey = (r, c) => `${r}-${c}`;
+
+function normalizeGender(v) {
+  if (!v) return 'unknown';
+  const s = String(v).trim().toLowerCase();
+  const maleList  = ['male','m','男','男子','boy'];
+  const femaleList = ['female','f','女','女子','girl'];
+  if (maleList.includes(s))   return 'male';
+  if (femaleList.includes(s)) return 'female';
+  return 'unknown';
+}
+
+function normalizeVision(v) {
+  if (!v) return 'normal';
+  const s = String(v).trim();
+  return /poor|悪|弱/.test(s) ? 'poor' : 'normal';
+}
+
+function normalizeHeight(v) {
+  if (!v) return 'normal';
+  const s = String(v).trim();
+  return /tall|高/.test(s) ? 'tall' : 'normal';
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
+  return lines.map(line => {
+    const cols = line.split(/[,\t]/).map(c => c.trim());
+    // 新形式: 名前, 性別, 視力, 身長, メモ
+    // 旧形式: 名前, 視力, 身長, メモ
+    const name = cols[0] || '';
+    let gender = 'unknown', vision = 'normal', height = 'normal', notes = '';
+    const maybeGender = normalizeGender(cols[1]);
+    if (maybeGender !== 'unknown' || ['male','female','unknown','m','f','男','女','男子','女子','boy','girl'].includes((cols[1]||'').trim().toLowerCase())) {
+      // 新形式（性別あり）
+      gender = maybeGender;
+      vision = normalizeVision(cols[2]);
+      height = normalizeHeight(cols[3]);
+      notes  = cols.slice(4).join(', ');
+    } else {
+      // 旧形式（性別なし）
+      vision = normalizeVision(cols[1]);
+      height = normalizeHeight(cols[2]);
+      notes  = cols.slice(3).join(', ');
+    }
+    return { id: uid(), name, gender, vision, height, notes };
+  }).filter(s => s.name);
+}
+
+// ─── アルゴリズム ────────────────────────────────────────────
+function getNeighbors(r, c, rows, cols) {
+  const ns = [];
+  if (c + 1 < cols) ns.push(seatKey(r, c + 1)); // 右
+  if (r + 1 < rows) ns.push(seatKey(r + 1, c)); // 下
+  return ns;
+}
+
+function getPairs(grid, rows, cols) {
+  const pairs = new Set();
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const a = grid[r][c];
+      if (!a) continue;
+      if (c + 1 < cols && grid[r][c+1]) {
+        const b = grid[r][c+1];
+        pairs.add([a,b].sort().join('|'));
+      }
+      if (r + 1 < rows && grid[r+1][c]) {
+        const b = grid[r+1][c];
+        pairs.add([a,b].sort().join('|'));
+      }
+    }
+  }
+  return [...pairs];
+}
+
+function scoreGrid(grid, students, rows, cols, history, options) {
+  const { visionWeight=2, heightWeight=2, historyWindow=3,
+          sameSeatPenalty=5, sameNeighborPenalty=3, clusterPenalty=2,
+          genderMix=true, genderMixWeight=1 } = options;
+  const studMap = Object.fromEntries(students.map(s => [s.id, s]));
+  let score = 0;
+  const histSlice = history.slice(-historyWindow);
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const sid = grid[r][c];
+      if (!sid) continue;
+      const st = studMap[sid];
+      if (!st) continue;
+
+      // 視力配慮：前方ほど高得点
+      if (st.vision === 'poor') score += (rows - r) * visionWeight;
+      // 高身長：後方ほど高得点
+      if (st.height === 'tall') score += r * heightWeight;
+
+      // 過去同席ペナルティ
+      for (const h of histSlice) {
+        if (h.grid[r]?.[c] === sid) score -= sameSeatPenalty;
+      }
+
+      // poorクラスタ抑制
+      if (st.vision === 'poor') {
+        if (c + 1 < cols && studMap[grid[r][c+1]]?.vision === 'poor') score -= clusterPenalty;
+        if (r + 1 < rows && studMap[grid[r+1]?.[c]]?.vision === 'poor') score -= clusterPenalty;
+      }
+    }
+  }
+
+  // 過去同隣ペナルティ
+  const currentPairs = new Set(getPairs(grid, rows, cols));
+  for (const h of histSlice) {
+    for (const p of h.pairs) {
+      if (currentPairs.has(p)) score -= sameNeighborPenalty;
+    }
+  }
+
+  // 男女混在（2列ペアごと）
+  if (genderMix) {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c + 1 < cols; c += 2) {
+        const a = studMap[grid[r][c]];
+        const b = studMap[grid[r][c+1]];
+        if (!a || !b) continue;
+        if (a.gender !== 'unknown' && b.gender !== 'unknown') {
+          if (a.gender !== b.gender) score += genderMixWeight;
+          else score -= genderMixWeight;
+        }
+      }
+    }
+  }
+
+  return score;
+}
+
+function generateSeating(students, rows, cols, blocked, fixedMap, history, options) {
+  const { trials=40, hillSteps=200 } = options;
+  const blockedSet = new Set(blocked);
+  const availSeats = [];
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      if (!blockedSet.has(seatKey(r,c))) availSeats.push([r,c]);
+
+  // 固定済み座席を除いた空き座席
+  const fixedKeys = new Set(Object.keys(fixedMap));
+  const freeSeats = availSeats.filter(([r,c]) => !fixedKeys.has(seatKey(r,c)));
+
+  // 固定されていない生徒
+  const fixedStudents = new Set(Object.values(fixedMap));
+  const freeStudents = students.filter(s => !fixedStudents.has(s.id)).map(s => s.id);
+
+  if (freeStudents.length > freeSeats.length) {
+    throw new Error(`座席が不足しています（生徒${freeStudents.length}人 > 空き席${freeSeats.length}）`);
+  }
+
+  function makeGrid(assignment) {
+    const grid = Array.from({length: rows}, () => Array(cols).fill(null));
+    // 固定席
+    for (const [key, sid] of Object.entries(fixedMap)) {
+      const [r,c] = key.split('-').map(Number);
+      grid[r][c] = sid;
+    }
+    // 自由席
+    for (let i = 0; i < assignment.length; i++) {
+      const [r,c] = freeSeats[i];
+      grid[r][c] = assignment[i];
+    }
+    return grid;
+  }
+
+  function shuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length-1; i>0; i--) {
+      const j = Math.floor(Math.random()*(i+1));
+      [a[i],a[j]] = [a[j],a[i]];
+    }
+    return a;
+  }
+
+  let bestGrid = null, bestScore = -Infinity;
+
+  for (let t = 0; t < trials; t++) {
+    let asgn = shuffle(freeStudents).slice(0, freeSeats.length);
+    let grid = makeGrid(asgn);
+    let sc = scoreGrid(grid, students, rows, cols, history, options);
+
+    // ヒルクライム
+    for (let s = 0; s < hillSteps; s++) {
+      const i = Math.floor(Math.random()*asgn.length);
+      const j = Math.floor(Math.random()*asgn.length);
+      if (i === j) continue;
+      [asgn[i], asgn[j]] = [asgn[j], asgn[i]];
+      const newGrid = makeGrid(asgn);
+      const newSc = scoreGrid(newGrid, students, rows, cols, history, options);
+      if (newSc >= sc) { grid = newGrid; sc = newSc; }
+      else { [asgn[i], asgn[j]] = [asgn[j], asgn[i]]; } // 戻す
+    }
+
+    if (sc > bestScore) { bestScore = sc; bestGrid = grid; }
+  }
+
+  const pairs = getPairs(bestGrid, rows, cols);
+  return { grid: bestGrid, pairs, score: bestScore };
+}
+
+// ─── デフォルト状態 ─────────────────────────────────────────
+const DEFAULT_OPTIONS = {
+  trials: 40, hillSteps: 200,
+  visionWeight: 2, heightWeight: 2,
+  historyWindow: 3,
+  sameSeatPenalty: 5, sameNeighborPenalty: 3, clusterPenalty: 2,
+  genderMix: true, genderMixWeight: 1,
+};
+
+const DEFAULT_STATE = {
+  students: [],
+  rows: 5, cols: 6,
+  blocked: [],
+  fixedMap: {},
+  history: [],
+  current: null,
+  options: DEFAULT_OPTIONS,
+  fitToScreen: true,
+};
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem('seatArranger_v1');
+    if (!raw) return DEFAULT_STATE;
+    const parsed = JSON.parse(raw);
+    return { ...DEFAULT_STATE, ...parsed, options: { ...DEFAULT_OPTIONS, ...(parsed.options || {}) } };
+  } catch { return DEFAULT_STATE; }
+}
+
+function saveState(state) {
+  try { localStorage.setItem('seatArranger_v1', JSON.stringify(state)); } catch {}
+}
+
+// ─── コンポーネント群 ─────────────────────────────────────────
+
+// Pill タグ
+function Pill({ label, color }) {
+  const colors = {
+    blue:   'bg-sky-100 text-sky-700',
+    red:    'bg-rose-100 text-rose-700',
+    orange: 'bg-orange-100 text-orange-700',
+    amber:  'bg-amber-100 text-amber-700',
+    gray:   'bg-gray-100 text-gray-600',
+  };
+  return <span className={`tag ${colors[color]||colors.gray}`}>{label}</span>;
+}
+
+// Toast 通知
+function Toast({ msg, onClose }) {
+  useEffect(() => { const t = setTimeout(onClose, 3500); return () => clearTimeout(t); }, []);
+  return (
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-gray-800 text-white px-5 py-3 rounded-xl shadow-xl text-sm flex items-center gap-3">
+      <span>{msg}</span>
+      <button onClick={onClose} className="text-gray-400 hover:text-white">✕</button>
+    </div>
+  );
+}
+
+// スピナー（ - / 数値 / + ）
+function Spinner({ label, value, min=1, max=15, onChange }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-sm text-gray-600 w-8">{label}</span>
+      <button className="spin-btn" onClick={() => onChange(Math.max(min, value-1))}>−</button>
+      <input className="spin-input" type="number" min={min} max={max} value={value}
+        onChange={e => { const v=parseInt(e.target.value); if (!isNaN(v)) onChange(Math.max(min,Math.min(max,v))); }} />
+      <button className="spin-btn" onClick={() => onChange(Math.min(max, value+1))}>＋</button>
+    </div>
+  );
+}
+
+// ─── 生徒管理タブ ──────────────────────────────────────────────
+function StudentTab({ students, fixedMap, onAdd, onDelete, onClear }) {
+  const [form, setForm] = useState({ name:'', gender:'unknown', vision:'normal', height:'normal', notes:'' });
+  const [csvText, setCsvText] = useState('');
+  const [csvPreview, setCsvPreview] = useState(null);
+  const [showCsv, setShowCsv] = useState(false);
+
+  function submitForm(e) {
+    e.preventDefault();
+    if (!form.name.trim()) return;
+    onAdd([{ id: uid(), ...form, name: form.name.trim() }]);
+    setForm({ name:'', gender:'unknown', vision:'normal', height:'normal', notes:'' });
+  }
+
+  function parseCsvPreview() {
+    const parsed = parseCSV(csvText);
+    setCsvPreview(parsed);
+  }
+
+  function applyCSV() {
+    if (csvPreview) { onAdd(csvPreview); setCsvText(''); setCsvPreview(null); setShowCsv(false); }
+  }
+
+  const genderLabel = { male:'男子', female:'女子', unknown:'不明' };
+  const genderColor = { male:'blue', female:'red', unknown:'gray' };
+
+  return (
+    <div className="space-y-4">
+      {/* 手動追加フォーム */}
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">生徒を追加</h2>
+        <form onSubmit={submitForm} className="space-y-3">
+          <div className="flex gap-2 flex-wrap">
+            <input className="border rounded-lg px-3 py-2 text-sm flex-1 min-w-[120px]" placeholder="名前*" value={form.name}
+              onChange={e => setForm(f=>({...f, name:e.target.value}))} />
+            <select className="border rounded-lg px-2 py-2 text-sm" value={form.gender}
+              onChange={e => setForm(f=>({...f, gender:e.target.value}))}>
+              <option value="unknown">性別:不明</option>
+              <option value="male">男子</option>
+              <option value="female">女子</option>
+            </select>
+            <select className="border rounded-lg px-2 py-2 text-sm" value={form.vision}
+              onChange={e => setForm(f=>({...f, vision:e.target.value}))}>
+              <option value="normal">視力:普通</option>
+              <option value="poor">視力:配慮</option>
+            </select>
+            <select className="border rounded-lg px-2 py-2 text-sm" value={form.height}
+              onChange={e => setForm(f=>({...f, height:e.target.value}))}>
+              <option value="normal">身長:普通</option>
+              <option value="tall">高身長</option>
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <input className="border rounded-lg px-3 py-2 text-sm flex-1" placeholder="メモ（任意）" value={form.notes}
+              onChange={e => setForm(f=>({...f, notes:e.target.value}))} />
+            <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium">追加</button>
+          </div>
+        </form>
+      </div>
+
+      {/* CSV取り込み */}
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">CSV/TSV 取り込み</h2>
+          <button onClick={() => setShowCsv(!showCsv)} className="text-xs text-blue-600 hover:underline">
+            {showCsv ? '閉じる' : '開く'}
+          </button>
+        </div>
+        {showCsv && (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-500">形式: <code>名前, 性別, 視力, 身長, メモ</code> または <code>名前, 視力, 身長, メモ</code></p>
+            <textarea className="w-full border rounded-lg p-2 text-sm font-mono h-28 resize-none" placeholder="ここにCSV/TSVを貼り付け..."
+              value={csvText} onChange={e => { setCsvText(e.target.value); setCsvPreview(null); }} />
+            <div className="flex gap-2">
+              <button onClick={parseCsvPreview} className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-sm">プレビュー</button>
+              {csvPreview && (
+                <button onClick={applyCSV} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm font-medium">
+                  {csvPreview.length}人を追加
+                </button>
+              )}
+            </div>
+            {csvPreview && (
+              <div className="border rounded-lg overflow-hidden mt-1">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 text-gray-500"><tr>
+                    <th className="px-2 py-1 text-left">名前</th><th className="px-2 py-1">性別</th>
+                    <th className="px-2 py-1">視力</th><th className="px-2 py-1">身長</th><th className="px-2 py-1 text-left">メモ</th>
+                  </tr></thead>
+                  <tbody>{csvPreview.map((s,i) => (
+                    <tr key={i} className="border-t"><td className="px-2 py-1">{s.name}</td>
+                      <td className="px-2 py-1 text-center">{genderLabel[s.gender]}</td>
+                      <td className="px-2 py-1 text-center">{s.vision==='poor'?'配慮':'-'}</td>
+                      <td className="px-2 py-1 text-center">{s.height==='tall'?'高':'- '}</td>
+                      <td className="px-2 py-1 text-gray-400">{s.notes}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 生徒一覧 */}
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide">名簿 ({students.length}人)</h2>
+          {students.length > 0 && (
+            <button onClick={onClear} className="text-xs text-red-500 hover:text-red-700">全消去</button>
+          )}
+        </div>
+        {students.length === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-4">生徒が登録されていません</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-gray-500 border-b"><tr>
+                <th className="pb-2 text-left">名前</th><th className="pb-2">性別</th>
+                <th className="pb-2">視力</th><th className="pb-2">身長</th>
+                <th className="pb-2 text-left pl-2">メモ</th><th className="pb-2"></th>
+              </tr></thead>
+              <tbody className="divide-y divide-gray-50">{students.map(s => (
+                <tr key={s.id} className="hover:bg-gray-50">
+                  <td className="py-1.5 font-medium">{s.name}
+                    {fixedMap && Object.values(fixedMap).includes(s.id) && <Pill label="固定" color="amber" />}
+                  </td>
+                  <td className="py-1.5 text-center"><Pill label={genderLabel[s.gender]} color={genderColor[s.gender]} /></td>
+                  <td className="py-1.5 text-center">{s.vision==='poor' && <Pill label="配慮" color="orange" />}</td>
+                  <td className="py-1.5 text-center">{s.height==='tall' && <Pill label="高" color="gray" />}</td>
+                  <td className="py-1.5 pl-2 text-gray-400 text-xs">{s.notes}</td>
+                  <td className="py-1.5 text-right">
+                    <button onClick={() => onDelete(s.id)} className="text-red-400 hover:text-red-600 text-xs px-1">✕</button>
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── 座席設定タブ ─────────────────────────────────────────────
+function SeatTab({ rows, cols, blocked, fixedMap, students, onRowsChange, onColsChange, onToggleBlocked, onToggleFixed, onClearFixed }) {
+  const studMap = Object.fromEntries(students.map(s=>[s.id,s]));
+  const [fixTarget, setFixTarget] = useState('');
+  const [clickedSeat, setClickedSeat] = useState(null);
+
+  function handleSeatClick(r, c) {
+    const key = seatKey(r, c);
+    setClickedSeat(key);
+  }
+
+  function applyBlock(key) {
+    onToggleBlocked(key);
+    setClickedSeat(null);
+  }
+
+  function applyFix(key, sid) {
+    onToggleFixed(key, sid || null);
+    setFixTarget('');
+    setClickedSeat(null);
+  }
+
+  const bgColor = (r, c) => {
+    const key = seatKey(r,c);
+    if (blocked.includes(key)) return 'bg-gray-200 border-gray-300 cursor-pointer opacity-60';
+    const sid = fixedMap[key];
+    if (sid) {
+      const st = studMap[sid];
+      if (st?.gender === 'male')   return 'bg-sky-100 border-sky-300 cursor-pointer';
+      if (st?.gender === 'female') return 'bg-rose-100 border-rose-300 cursor-pointer';
+    }
+    return 'bg-white border-gray-200 cursor-pointer hover:bg-gray-50';
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* サイズ設定 */}
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">座席サイズ</h2>
+        <div className="flex flex-wrap gap-4">
+          <Spinner label="縦" value={rows} onChange={onRowsChange} />
+          <Spinner label="横" value={cols} onChange={onColsChange} />
+        </div>
+      </div>
+
+      {/* グリッド（クリックで操作） */}
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">座席レイアウト（クリックで設定）</h2>
+        <p className="text-xs text-gray-400 mb-3">前方 ↑ / 後方 ↓ &nbsp;&nbsp; クリックで「利用不可」または「固定」を設定</p>
+        <div className="seat-grid-wrap">
+          <div className="seat-grid-inner">
+            {Array.from({length: rows}, (_,r) => (
+              <div key={r} className="flex gap-1 mb-1">
+                {Array.from({length: cols}, (_,c) => {
+                  const key = seatKey(r,c);
+                  const isBlocked = blocked.includes(key);
+                  const fixedSid = fixedMap[key];
+                  const fixedSt = fixedSid ? studMap[fixedSid] : null;
+                  return (
+                    <div key={c} onClick={() => handleSeatClick(r,c)}
+                      className={`relative flex flex-col items-center justify-center border rounded-lg text-xs ${bgColor(r,c)}`}
+                      style={{minWidth:56,minHeight:48}}>
+                      {isBlocked ? <span className="text-gray-400">×</span> :
+                       fixedSt ? <><span className="font-medium text-center leading-tight px-0.5" style={{fontSize:11}}>{fixedSt.name}</span>
+                         <Pill label="固定" color="amber" /></> :
+                       <span className="text-gray-300">{r+1}-{c+1}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+        {blocked.length > 0 && (
+          <button onClick={() => blocked.forEach(k=>onToggleBlocked(k))} className="mt-2 text-xs text-red-500 hover:underline">
+            利用不可を全解除
+          </button>
+        )}
+        {Object.keys(fixedMap).length > 0 && (
+          <button onClick={onClearFixed} className="mt-2 ml-3 text-xs text-amber-600 hover:underline">
+            固定を全解除
+          </button>
+        )}
+      </div>
+
+      {/* 座席クリックモーダル */}
+      {clickedSeat && (
+        <div className="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4" onClick={() => setClickedSeat(null)}>
+          <div className="bg-white rounded-xl shadow-xl p-5 w-72" onClick={e => e.stopPropagation()}>
+            <h3 className="font-semibold mb-3">座席 {clickedSeat} の設定</h3>
+            <div className="space-y-2">
+              <button onClick={() => applyBlock(clickedSeat)}
+                className="w-full text-left px-3 py-2 rounded-lg border hover:bg-gray-50 text-sm">
+                {blocked.includes(clickedSeat) ? '✅ 利用不可を解除' : '🚫 利用不可にする'}
+              </button>
+              {!blocked.includes(clickedSeat) && (
+                <div>
+                  <p className="text-xs text-gray-500 mb-1 mt-2">固定する生徒を選択:</p>
+                  <select className="w-full border rounded-lg px-2 py-1.5 text-sm mb-2" value={fixTarget}
+                    onChange={e => setFixTarget(e.target.value)}>
+                    <option value="">（解除）</option>
+                    {students.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                  <button onClick={() => applyFix(clickedSeat, fixTarget)}
+                    className="w-full bg-amber-500 hover:bg-amber-600 text-white py-1.5 rounded-lg text-sm">
+                    {fixTarget ? '固定する' : '固定を解除'}
+                  </button>
+                </div>
+              )}
+            </div>
+            <button onClick={() => setClickedSeat(null)} className="mt-3 w-full text-sm text-gray-400 hover:text-gray-600">キャンセル</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── 生成・履歴タブ ─────────────────────────────────────────────
+function GenerateTab({ students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen,
+                       onGenerate, onSelectHistory, onDeleteHistory, onOptionsChange, onFitChange }) {
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState('');
+  const studMap = Object.fromEntries(students.map(s=>[s.id,s]));
+
+  async function handleGenerate() {
+    setGenerating(true); setError('');
+    try {
+      await new Promise(r => setTimeout(r, 30)); // UIスレッド解放
+      const result = generateSeating(students, rows, cols, blocked, fixedMap, history, options);
+      onGenerate(result);
+    } catch(e) { setError(e.message); }
+    finally { setGenerating(false); }
+  }
+
+  const currentItem = history.find(h => h.id === current);
+  const currentIdx = history.findIndex(h => h.id === current);
+  const prevItem = currentIdx > 0 ? history[currentIdx - 1] : null;
+
+  // 差分計算
+  const diff = useMemo(() => {
+    if (!currentItem || !prevItem) return null;
+    let sameSeat = 0, sameNeighbor = 0;
+    for (let r=0; r<currentItem.rows; r++)
+      for (let c=0; c<currentItem.cols; c++)
+        if (currentItem.grid[r]?.[c] && currentItem.grid[r][c] === prevItem.grid[r]?.[c]) sameSeat++;
+    const prev = new Set(prevItem.pairs);
+    for (const p of currentItem.pairs) if (prev.has(p)) sameNeighbor++;
+    return { sameSeat, sameNeighbor };
+  }, [currentItem, prevItem]);
+
+  // 左右ペア重複検出
+  const dupPairs = useMemo(() => {
+    if (!currentItem || !prevItem) return new Set();
+    const s = new Set();
+    const prevLR = new Set();
+    for (let r=0; r<prevItem.rows; r++)
+      for (let c=0; c+1<prevItem.cols; c++) {
+        const a=prevItem.grid[r][c], b=prevItem.grid[r][c+1];
+        if (a&&b) prevLR.add([a,b].sort().join('|'));
+      }
+    for (let r=0; r<currentItem.rows; r++)
+      for (let c=0; c+1<currentItem.cols; c++) {
+        const a=currentItem.grid[r][c], b=currentItem.grid[r][c+1];
+        if (a&&b && prevLR.has([a,b].sort().join('|'))) { s.add(seatKey(r,c)); s.add(seatKey(r,c+1)); }
+      }
+    return s;
+  }, [currentItem, prevItem]);
+
+  // fitScale 計算
+  const gridRef = useRef(null);
+  const [fitScale, setFitScale] = useState(1);
+  useEffect(() => {
+    if (!fitToScreen || !gridRef.current) return;
+    const naturalW = cols * 64 + (cols-1)*4;
+    const containerW = gridRef.current.parentElement?.clientWidth || 400;
+    setFitScale(Math.min(1, containerW / naturalW));
+  }, [fitToScreen, cols, currentItem]);
+
+  function seatBg(r, c) {
+    const sid = currentItem?.grid[r]?.[c];
+    if (!sid) return 'bg-white border-gray-100';
+    const st = studMap[sid];
+    const dup = dupPairs.has(seatKey(r,c));
+    if (dup) return 'border-red-400 border-2 ' + (st?.gender==='male' ? 'bg-sky-50' : st?.gender==='female' ? 'bg-rose-50' : 'bg-white');
+    if (st?.gender==='male')   return 'bg-sky-50 border-sky-200';
+    if (st?.gender==='female') return 'bg-rose-50 border-rose-200';
+    return 'bg-gray-50 border-gray-200';
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 生成コントロール */}
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">席替えを生成</h2>
+        <div className="flex flex-wrap gap-3 items-center mb-3">
+          <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+            <input type="checkbox" checked={options.genderMix} onChange={e=>onOptionsChange({genderMix:e.target.checked})} />
+            男女を隣り合わせ
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-gray-500 cursor-pointer">
+            <input type="checkbox" checked={fitToScreen} onChange={e=>onFitChange(e.target.checked)} />
+            画面に縮小表示
+          </label>
+        </div>
+        {error && <p className="text-red-500 text-sm mb-2">{error}</p>}
+        <button onClick={handleGenerate} disabled={generating || students.length===0}
+          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
+          {generating ? <><span className="animate-spin">⟳</span> 生成中…</> : '席替えを生成'}
+        </button>
+      </div>
+
+      {/* 座席表 */}
+      {currentItem && (
+        <div className="bg-white rounded-xl shadow-sm p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-700">{currentItem.title}</h2>
+              <p className="text-xs text-gray-400">スコア: {currentItem.score} | {currentItem.rows}×{currentItem.cols}</p>
+            </div>
+            {diff && (
+              <div className="flex gap-3 text-xs">
+                <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded-lg">同席 {diff.sameSeat}人</span>
+                <span className="bg-purple-50 text-purple-700 px-2 py-1 rounded-lg">同隣 {diff.sameNeighbor}組</span>
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-gray-400 mb-2">↑ 前方（黒板）</p>
+          <div ref={gridRef} className="seat-grid-wrap">
+            <div className="seat-grid-inner" style={fitToScreen && fitScale < 1 ? {transform:`scale(${fitScale})`,transformOrigin:'top left'} : {}}>
+              {Array.from({length: currentItem.rows}, (_,r) => (
+                <div key={r} className="flex gap-1 mb-1">
+                  {Array.from({length: currentItem.cols}, (_,c) => {
+                    const key = seatKey(r,c);
+                    const sid = currentItem.grid[r]?.[c];
+                    const st = sid ? studMap[sid] : null;
+                    const dup = dupPairs.has(key);
+                    return (
+                      <div key={c} className={`flex flex-col items-center justify-center border rounded-lg px-1 py-1 ${seatBg(r,c)}`}
+                        style={{minWidth:60,minHeight:52}}>
+                        {st ? (
+                          <>
+                            <span className="text-xs font-medium text-center leading-tight">{st.name}</span>
+                            <div className="flex flex-wrap justify-center">
+                              {st.vision==='poor' && <Pill label="視力" color="orange" />}
+                              {st.height==='tall' && <Pill label="高" color="gray" />}
+                              {dup && <Pill label="前回同" color="red" />}
+                            </div>
+                          </>
+                        ) : <span className="text-gray-200 text-xs">空</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 履歴リスト */}
+      {history.length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm p-4">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">履歴</h2>
+          <div className="space-y-1">
+            {[...history].reverse().map(h => (
+              <div key={h.id} onClick={() => onSelectHistory(h.id)}
+                className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer text-sm ${h.id===current ? 'bg-blue-50 border border-blue-200' : 'hover:bg-gray-50'}`}>
+                <div>
+                  <span className="font-medium">{h.title}</span>
+                  <span className="ml-2 text-xs text-gray-400">スコア:{h.score}</span>
+                </div>
+                <button onClick={e => { e.stopPropagation(); onDeleteHistory(h.id); }}
+                  className="text-red-400 hover:text-red-600 text-xs px-1">✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── メインアプリ ─────────────────────────────────────────────
+function App() {
+  const [state, setState] = useState(loadState);
+  const [tab, setTab] = useState('students');
+  const [toast, setToast] = useState(null);
+  const fileRef = useRef();
+
+  const { students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen } = state;
+
+  useEffect(() => { saveState(state); }, [state]);
+
+  const set = useCallback((patch) => setState(s => ({ ...s, ...patch })), []);
+
+  function addStudents(list) { set({ students: [...students, ...list] }); }
+  function deleteStudent(id) {
+    const newFixed = { ...fixedMap };
+    for (const [k,v] of Object.entries(newFixed)) if (v===id) delete newFixed[k];
+    set({ students: students.filter(s=>s.id!==id), fixedMap: newFixed });
+  }
+  function clearStudents() { set({ students:[], fixedMap:{} }); }
+
+  function setRows(v) { set({ rows:v, blocked: blocked.filter(k => parseInt(k)<v), fixedMap: Object.fromEntries(Object.entries(fixedMap).filter(([k])=>parseInt(k)<v)) }); }
+  function setCols(v) { set({ cols:v, blocked: blocked.filter(k => parseInt(k.split('-')[1])<v), fixedMap: Object.fromEntries(Object.entries(fixedMap).filter(([k])=>parseInt(k.split('-')[1])<v)) }); }
+
+  function toggleBlocked(key) {
+    const newFixed = { ...fixedMap };
+    delete newFixed[key];
+    if (blocked.includes(key)) set({ blocked: blocked.filter(k=>k!==key), fixedMap: newFixed });
+    else set({ blocked: [...blocked, key], fixedMap: newFixed });
+  }
+  function toggleFixed(key, sid) {
+    const newFixed = { ...fixedMap };
+    if (!sid) delete newFixed[key]; else newFixed[key] = sid;
+    set({ fixedMap: newFixed });
+  }
+  function clearFixed() { set({ fixedMap: {} }); }
+
+  function onGenerate(result) {
+    const item = {
+      id: uid(),
+      title: new Date().toLocaleString('ja-JP', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}),
+      createdAt: new Date().toISOString(),
+      rows, cols, score: result.score, grid: result.grid, pairs: result.pairs,
+    };
+    const newHistory = [...history, item];
+    set({ history: newHistory, current: item.id });
+    setToast(`生成完了！スコア: ${result.score}`);
+    setTab('generate');
+  }
+
+  function handleExport() {
+    const data = JSON.stringify({ students, rows, cols, blocked, fixedMap, history, current, options, fitToScreen, exportedAt: new Date().toISOString() }, null, 2);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([data], {type:'application/json'}));
+    a.download = `seat-arranger-${Date.now()}.json`;
+    a.click();
+  }
+
+  function handleImport(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const d = JSON.parse(ev.target.result);
+        setState({ ...DEFAULT_STATE, ...d, options: { ...DEFAULT_OPTIONS, ...(d.options||{}) } });
+        setToast('データを読み込みました');
+      } catch { setToast('読み込みに失敗しました'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  const TABS = [
+    { id:'students', label:'生徒管理' },
+    { id:'seats',    label:'座席設定' },
+    { id:'generate', label:'生成・履歴' },
+  ];
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* ヘッダー */}
+      <header className="bg-white border-b sticky top-0 z-30">
+        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+          <h1 className="text-lg font-bold text-gray-800">席替えアプリ</h1>
+          <div className="flex gap-2">
+            <button onClick={handleExport} className="text-xs border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-gray-600">情報を保存</button>
+            <button onClick={() => fileRef.current.click()} className="text-xs border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 text-gray-600">情報を読込</button>
+            <input ref={fileRef} type="file" accept=".json" className="hidden" onChange={handleImport} />
+          </div>
+        </div>
+        {/* タブ */}
+        <div className="max-w-3xl mx-auto px-4 flex gap-0">
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab===t.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="max-w-3xl mx-auto px-4 py-4">
+        {tab==='students' && (
+          <StudentTab students={students} fixedMap={fixedMap} onAdd={addStudents} onDelete={deleteStudent} onClear={clearStudents} />
+        )}
+        {tab==='seats' && (
+          <SeatTab rows={rows} cols={cols} blocked={blocked} fixedMap={fixedMap} students={students}
+            onRowsChange={setRows} onColsChange={setCols}
+            onToggleBlocked={toggleBlocked} onToggleFixed={toggleFixed} onClearFixed={clearFixed} />
+        )}
+        {tab==='generate' && (
+          <GenerateTab students={students} rows={rows} cols={cols} blocked={blocked} fixedMap={fixedMap}
+            history={history} current={current} options={options} fitToScreen={fitToScreen}
+            onGenerate={onGenerate}
+            onSelectHistory={id => set({ current: id })}
+            onDeleteHistory={id => {
+              const newH = history.filter(h=>h.id!==id);
+              set({ history: newH, current: current===id ? (newH[newH.length-1]?.id||null) : current });
+            }}
+            onOptionsChange={o => set({ options: {...options,...o} })}
+            onFitChange={v => set({ fitToScreen: v })}
+          />
+        )}
+      </main>
+
+      {toast && <Toast msg={toast} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
